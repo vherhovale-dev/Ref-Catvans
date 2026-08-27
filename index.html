@@ -5,10 +5,6 @@
 <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover">
 <meta name="mobile-web-app-capable" content="yes">
 <meta name="apple-mobile-web-app-capable" content="yes">
-<link rel="manifest" href="manifest.json">
-<meta name="theme-color" content="#161514">
-<link rel="icon" href="icon-192.png">
-<link rel="apple-touch-icon" href="icon-192.png">
 <title>Tablero — Referencias</title>
 <style>
   :root{
@@ -202,21 +198,22 @@
   body.global-lock.toolbar-left #action-capsule #btn-global-lock{
     left:calc(14px + env(safe-area-inset-left));right:auto;}
   body.global-lock #action-capsule #btn-global-lock:active{opacity:.85;}
-  /* FIX: #action-capsule.has-overflow aplica un mask-image (desvanecido
-     de scroll horizontal — ver esa regla más arriba) sobre TODA la
-     cápsula, incluido el botón que se escapa con position:fixed en modo
-     candado/ocultar — el buffer de composición de esa máscara puede
-     terminar recortando un poco el círculo flotante. Se desactiva la
-     máscara por completo mientras el botón está en su posición
-     flotante, para que se vea siempre completo y redondo. */
-  body.global-lock #action-capsule.has-overflow,
-  body.ui-hidden #action-capsule.has-overflow{
-    -webkit-mask-image:none;mask-image:none;}
+  /* ANTES acá se desactivaba el mask-image del desvanecido de scroll
+     mientras el botón de candado/ojo estaba en su posición flotante,
+     porque el mask (al aplicarse sobre TODO el árbol de hijos de
+     #action-capsule) podía recortar mal ese círculo. Con el cambio a
+     pseudo-elementos de degradado (ver #action-capsule::before/::after
+     más arriba), ya no existe ninguna máscara que afecte a otros hijos
+     — son solo dos cajas decorativas más, no un filtro sobre el resto —
+     así que el recorte no puede volver a pasar y esta regla ya no hace
+     falta: los pseudo-elementos heredan `visibility:hidden` del propio
+     #action-capsule en estos modos, igual que cualquier otro hijo. */
   /* Si el modo ocultar (ojo) y el candado están activos a la vez, ambos
      botones de control quedan flotando en la misma esquina — se apila
      el del ojo debajo del candado para que no se superpongan. */
   body.global-lock.ui-hidden #action-capsule #btn-hide-ui{
     top:calc(14px + env(safe-area-inset-top) + var(--sz-btn-icon) + 8px);}
+
 
   /* Ventanas flotantes de estudio: en modo candado permanecen visibles
      (a diferencia de antes), pero se bloquea toda interacción con ellas
@@ -415,10 +412,38 @@
     max-width:calc(100vw - 175px - 30px - env(safe-area-inset-left) - env(safe-area-inset-right));
     overflow-x:auto;-webkit-overflow-scrolling:touch;scrollbar-width:none;}
   #action-capsule::-webkit-scrollbar{display:none;}
-  #action-capsule.has-overflow{
-    -webkit-mask-image:linear-gradient(to right, transparent 0, #000 16px, #000 calc(100% - 16px), transparent 100%);
-    mask-image:linear-gradient(to right, transparent 0, #000 16px, #000 calc(100% - 16px), transparent 100%);
-  }
+  /* FIX DE PARPADEO ("barra de herramientas" corrupta al panear rápido):
+     el desvanecido de scroll horizontal usaba mask-image (ver más abajo
+     era antes), lo cual obliga al navegador a componer una capa de
+     máscara APARTE sobre TODA la cápsula — un paso extra de composición
+     frágil que, según el comentario histórico más abajo, hasta llegaba a
+     recortar mal el botón flotante de candado/ojo. Bajo la presión de
+     GPU que genera panear rápido por un tablero con muchas imágenes
+     (ver el comentario grande junto al aislamiento de capa GPU de la
+     interfaz), esa capa de máscara era un punto extra de fragilidad que
+     podía parpadear/corromperse junto con el resto.
+     Se reemplaza por dos pseudo-elementos con un degradado SÓLIDO (el
+     mismo color de fondo de la cápsula, desvaneciendo a transparente)
+     superpuestos en los bordes — visualmente idéntico al mask, pero sin
+     ninguna capa de máscara que el compositor tenga que reconciliar en
+     cada frame. `position:fixed` acá NO escapa al viewport como haría
+     normalmente: como #action-capsule ya tiene transform/will-change/
+     contain (ver la regla de aislamiento de capa GPU más abajo), ese
+     elemento pasa a ser el "containing block" de sus hijos
+     position:fixed — así los degradados quedan anclados a sus bordes
+     sin moverse durante el scroll interno de la cápsula, el mismo
+     efecto que el mask pero mucho más liviano y estable. Como ya no es
+     una máscara sobre TODO el árbol de hijos, tampoco puede recortar el
+     botón flotante de candado/ojo — así que la regla que antes
+     desactivaba el mask en esos modos (ver comentario histórico) ya no
+     hace falta: al ser pseudo-elementos heredan `visibility:hidden` del
+     propio #action-capsule en esos modos, igual que cualquier hijo. */
+  #action-capsule::before, #action-capsule::after{
+    content:'';position:fixed;top:0;bottom:0;width:16px;z-index:2;
+    pointer-events:none;opacity:0;transition:opacity .15s;}
+  #action-capsule::before{left:0;background:linear-gradient(to right, var(--panel), transparent);}
+  #action-capsule::after{right:0;background:linear-gradient(to left, var(--panel), transparent);}
+  #action-capsule.has-overflow::before, #action-capsule.has-overflow::after{opacity:1;}
   #action-capsule .sep{width:1px;align-self:stretch;background:var(--line);margin:2px 3px;flex-shrink:0;}
 
   /* ---- barra de herramientas a la izquierda (opción de configuración) ----
@@ -432,10 +457,12 @@
     flex-direction:column;max-width:none;max-height:calc(100vh - 100px);
     overflow-x:visible;overflow-y:auto;}
   body.toolbar-left #action-capsule .sep{width:auto;height:1px;align-self:stretch;margin:3px 2px;}
-  body.toolbar-left #action-capsule.has-overflow{
-    -webkit-mask-image:linear-gradient(to bottom, transparent 0, #000 16px, #000 calc(100% - 16px), transparent 100%);
-    mask-image:linear-gradient(to bottom, transparent 0, #000 16px, #000 calc(100% - 16px), transparent 100%);
-  }
+  /* Mismo cambio de mask a degradado por pseudo-elemento que arriba,
+     pero en el eje vertical (lo que desborda acá es el alto). */
+  body.toolbar-left #action-capsule::before, body.toolbar-left #action-capsule::after{
+    left:0;right:0;top:auto;bottom:auto;width:auto;height:16px;}
+  body.toolbar-left #action-capsule::before{top:0;background:linear-gradient(to bottom, var(--panel), transparent);}
+  body.toolbar-left #action-capsule::after{bottom:0;background:linear-gradient(to top, var(--panel), transparent);}
   /* El botón "Imágenes" es el único con texto (el resto ya son solo
      ícono) — con la barra parada en columna, ese texto obligaba a toda
      la barra a ser mucho más ancha que el resto de los botones. En este
@@ -493,6 +520,44 @@
   .swatch{width:22px;height:22px;border-radius:50%;cursor:pointer;border:2px solid transparent;flex-shrink:0;}
   .swatch.active{border-color:var(--ink);}
 
+  /* -----------------------------------------------------------------
+     AISLAMIENTO DE CAPA GPU PARA LA INTERFAZ (fix del "bugueo visual
+     de la barra de herramientas" durante pellizco agresivo, y del
+     parpadeo de barras al renderizar imágenes) ----------------------
+     #topbar, #action-capsule y #bottom-controls son `position:fixed`,
+     así que YA califican para su propia capa de composición — pero sin
+     una pista explícita, Chrome/WebView puede decidir en tiempo real
+     ascenderlas o fusionarlas con capas vecinas (algo que ocurre más
+     seguido bajo presión de memoria de GPU, que es justo lo que pasa
+     durante un pellizco brusco con #world reescalándose muchas veces
+     por segundo, o mientras el LOD sube/baja la resolución de varias
+     imágenes de golpe). Si la interfaz llega a compartir atlas/textura
+     con #world en el momento exacto en que el compositor tiene que
+     desalojar o invalidar mosaicos de #world, el resultado visible es
+     que la barra de herramientas se ve corrupta/parpadeante aunque
+     ningún estilo suyo cambió — no es un bug de la barra en sí, es
+     "ruido" de una capa ajena filtrándose. `translateZ(0)` +
+     `will-change:transform` fuerzan una promoción PERMANENTE y
+     explícita a su propia capa (a diferencia de .elm/.container-node,
+     que a propósito NO tienen will-change permanente — ver el
+     comentario junto a `.gpu-boost` más abajo: ahí el problema era
+     demasiadas capas GRANDES y pesadas; acá son unas pocas capas
+     chicas y baratas, así que el costo de mantenerlas siempre
+     promovidas es insignificante y la ganancia en aislamiento vale la
+     pena). `contain:paint` además le dice al navegador que nada de
+     dentro de esa caja pinta fuera de sus límites, así el compositor
+     puede tratarla como una unidad 100% independiente para reciclar
+     su mosaico sin tener que volver a mirar qué hay alrededor.
+     Se suman acá #sel-toolbar (la barra flotante de selección/
+     movimiento — la más expuesta, porque reaparece y se reposiciona
+     constantemente justo mientras se arrastran o redimensionan
+     imágenes), #node-controls y #pencil-panel: quedaban afuera de esta
+     regla y eran las barras que más se notaban parpadeando, ya que
+     ANTES no tenían su propia capa aislada. */
+  #topbar, #action-capsule, #bottom-controls,
+  #sel-toolbar, #node-controls, #pencil-panel{
+    transform:translateZ(0); will-change:transform; contain:paint;}
+
   /* ---- panel inferior derecho: zoom ---- */
   #bottom-controls{position:fixed;bottom:calc(25px + env(safe-area-inset-bottom));
     right:calc(25px + env(safe-area-inset-right));z-index:46;
@@ -503,6 +568,23 @@
   #zoomctl .btn{width:var(--sz-btn-icon-sm);height:var(--sz-btn-icon-sm);aspect-ratio:1/1;padding:0;box-shadow:none;border-radius:999px;flex-shrink:0;}
   #zoomctl .pct{font-family:var(--font-mono);font-size:var(--fs-small);color:var(--ink-dim);min-width:46px;text-align:center;flex-shrink:0;}
   body.hide-zoom-bar #zoomctl{display:none !important;}
+
+  /* ---- HUD de métricas de rendimiento del pellizco (opcional, ver
+     Ajustes > Interfaz > "Métricas de rendimiento"). Vive fuera de
+     #world (no viaja con el pan/zoom) y en su propia capa aislada por
+     la regla de arriba, así medir el rendimiento nunca puede volverse
+     parte del problema que está midiendo. ---- */
+  #perf-hud{position:fixed;top:calc(14px + env(safe-area-inset-top));
+    left:50%;transform:translate(-50%,0) translateZ(0);z-index:200;
+    display:none;align-items:center;gap:10px;pointer-events:none;
+    background:var(--panel);border:1px solid var(--line);border-radius:999px;
+    padding:5px 14px;box-shadow:var(--shadow);
+    font-family:var(--font-mono);font-size:11px;color:var(--ink-dim);
+    white-space:nowrap;contain:paint;}
+  #perf-hud b{color:var(--ink);font-weight:600;}
+  #perf-hud .perf-good{color:#5cb85c;}
+  #perf-hud .perf-bad{color:#d95f5f;}
+  body.show-perf-hud #perf-hud{display:flex;}
   /* Panel de Configuración > "Logotipo Ref Canvas". Activo (mostrar
      logo) por defecto; al desactivarlo, oculta por completo #topbar
      (la marca/logo de la app), sin afectar al resto de la interfaz. */
@@ -1185,6 +1267,12 @@
   <button id="exp-import">📂 Importar tablero (.json)</button>
 </div>
 
+<div id="perf-hud" aria-hidden="true">
+  <span>zoom <b id="perf-hud-zoom">100%</b></span>
+  <span>fps <b id="perf-hud-fps">--</b></span>
+  <span>peor frame <b id="perf-hud-worst">--</b></span>
+</div>
+
 <div id="bottom-controls">
   <div id="zoomctl">
     <button class="btn icon-only" id="zoom-out">−</button>
@@ -1293,6 +1381,11 @@
     <label class="switch"><input type="checkbox" id="setting-show-logo"><span class="switch-track"></span></label>
   </div>
 
+  <div class="settings-row">
+    <div class="settings-row-label"><span>Métricas de rendimiento (zoom)</span><small>Muestra un indicador flotante con FPS y el peor frame durante el pellizco, para validar que el zoom rinda bien</small></div>
+    <label class="switch"><input type="checkbox" id="setting-perf-hud"><span class="switch-track"></span></label>
+  </div>
+
   <div style="height:1px;background:var(--line);margin:6px 0;"></div>
   <button class="btn" id="btn-settings-reset" style="justify-content:center;color:var(--danger);border-color:var(--danger);">↺ Reiniciar configuraciones</button>
 </div>
@@ -1317,33 +1410,31 @@ let currentBoardName = null;
 
 let pan = {x: 0, y: 0};
 let zoom = 1;
-// Antes el zoom mínimo estaba fijo (y repetido) en 0.12 en varios lugares
-// del código — por diseño, no por error, pero era demasiado restrictivo:
-// no dejaba alejarse más allá del 12% para ver el lienzo completo desde
-// muy cerca. Un único límite compartido, mucho más permisivo (2%), y
-// referenciado desde todos los puntos donde se hace zoom (rueda,
-// pellizco, botones +/-) para que no queden límites descoordinados.
-const MIN_ZOOM = 0.02;
+// Antes el zoom mínimo era 0.02 (2%): permitía alejarse demasiado, y a
+// esos niveles extremos el navegador empieza a tener problemas de
+// rendimiento con capas grandes/transformadas (parpadeo, frames
+// perdidos, texturas que colapsan). Se sube el piso a 0.3 (30%) — el
+// mismo límite compartido y referenciado desde todos los puntos donde
+// se hace zoom (rueda, pellizco, botones +/-) para que no queden
+// límites descoordinados.
+const MIN_ZOOM = 0.3;
 const MAX_ZOOM = 3; // tope de zoom: 300% (antes 1000%, causaba el colapso de texturas; 400% aún parpadeaba)
 
 // -----------------------------------------------------------------
-// ZOOM AL 100% SOLO EN UN ARRANQUE "DESDE CERO" (app cerrada del todo)
+// ZOOM SIEMPRE AL 100% EN CADA ARRANQUE/RECARGA DEL PROGRAMA
 // -----------------------------------------------------------------
-// sessionStorage sobrevive a una recarga (F5) dentro de la MISMA pestaña
-// o proceso de WebView, pero el sistema/navegador lo borra apenas esa
-// pestaña o app se cierra por completo — por eso es la señal correcta
-// para distinguir "la app se abrió recién, de cero" de cualquier otro
-// caso. La primera vez que este script corre en una sesión nueva se
-// marca acá; restoreAutosave() usa esa marca para forzar el zoom a 100%
-// (sin tocar el pan, para no perder la posición guardada de la cámara)
-// SOLO en ese arranque desde cero — así un tablero que quedó muy alejado
-// o con zoom extremo nunca "asusta" al volver a abrir la app.
-const FRESH_LAUNCH_KEY = '__board_fresh_launch__';
-let isFreshLaunch = true;
-try{
-  isFreshLaunch = !sessionStorage.getItem(FRESH_LAUNCH_KEY);
-  sessionStorage.setItem(FRESH_LAUNCH_KEY, '1');
-}catch(_){ /* sessionStorage no disponible (modo privado, etc.): se asume arranque fresco */ }
+// ANTES esto se distinguía con una marca en sessionStorage: solo se
+// forzaba el zoom a 100% en un arranque "desde cero" (app cerrada del
+// todo y reabierta), y una simple recarga (F5) dentro de la misma
+// sesión respetaba el zoom guardado. Ahora, por pedido explícito, el
+// zoom se fuerza SIEMPRE a 100% al cargar — arranque desde cero,
+// recarga, o al abrir cualquier tablero guardado (ver loadBoard) — sin
+// importar en qué nivel de zoom/alejamiento se había quedado. El pan
+// (posición de cámara) sigue restaurándose tal cual estaba guardado;
+// solo el zoom se normaliza. Esto evita que una carga arranque en un
+// nivel de zoom extremo (muy alejado o muy acercado), que es
+// justamente donde más chances hay de que el contenido se vea a medio
+// cargar, parpadee o rinda mal.
 let globalLock = false; // Modo Candado Global: bloquea toda interacción con imágenes/notas, solo permite pan/zoom
 
 // -----------------------------------------------------------------
@@ -2031,6 +2122,33 @@ function resizeDrawCanvas(){
   redrawStrokeCanvasNow();
 }
 
+// -----------------------------------------------------------------
+// RECUPERACIÓN ANTE PÉRDIDA DE CONTEXTO GRÁFICO (fix del colapso que
+// "se contagia" a toda la app durante zoom extremo) -----------------
+// Bajo presión fuerte de memoria de GPU — que es exactamente lo que
+// genera un pellizco agresivo y sostenido con varias imágenes grandes
+// en pantalla — el navegador puede decidir DESCARTAR el contexto
+// gráfico de un <canvas> por completo (Canvas Context Loss: eventos
+// 'contextlost'/'contextrestored', ya estandarizados también para
+// contextos 2D, no solo WebGL) para liberar memoria. Sin manejarlo,
+// el canvas del Lápiz queda en blanco/roto para siempre hasta recargar
+// la página — y ese mismo evento de presión de memoria suele coincidir
+// con el instante en que el resto de la interfaz también se ve
+// corrupta, porque es la señal más directa de que el compositor
+// gráfico del sistema operativo está literalmente sin memoria. Estos
+// listeners no evitan la pérdida de memoria en sí (eso ya lo ataca el
+// LOD + el límite de MAX_ZOOM + la degasificación continua de arriba),
+// pero garantizan que la app se RECUPERE sola en cuanto el navegador
+// libera memoria y restaura el contexto, en vez de quedar rota.
+drawCanvas.addEventListener('contextlost', (e)=>{
+  e.preventDefault(); // permite que el navegador intente restaurar el contexto más adelante
+  toast('Recuperando el lienzo tras una caída de memoria gráfica…');
+}, false);
+drawCanvas.addEventListener('contextrestored', ()=>{
+  resizeDrawCanvas();   // el contexto restaurado arranca vacío: hay que re-configurar tamaño/DPR
+  forceFullRepaint();   // y forzar que TODO (imágenes, notas, trazos) se vuelva a pintar sin rastros corruptos
+}, false);
+
 function applyStrokeTransform(){
   // Reproduce EXACTAMENTE el mismo translate(pan)+scale(zoom) que
   // #world recibe vía CSS (ver requestTransformUpdate), pero como
@@ -2275,11 +2393,38 @@ let transformDirty = false;
 // movimiento, para que el lienzo se sienta fluido a 60fps incluso con
 // tableros grandes.
 let zoomingRestoreTimer = null;
+// -----------------------------------------------------------------
+// DEGASIFICACIÓN LOD CONTINUA DURANTE EL GESTO (fix del colapso en
+// pellizcos "bruscos" y sostenidos) -------------------------------
+// scheduleLodPass() antes SOLO corría ~160ms después de que la cámara
+// se quedaba QUIETA. Eso significa que durante un pellizco largo y
+// rápido (alejar mucho, de golpe, con varias imágenes grandes en
+// pantalla) el navegador tenía que re-teselar imágenes a resolución
+// completa contra un factor de escala que cambiaba constantemente
+// durante TODA la duración del gesto — es la ventana de tiempo más
+// larga de presión sobre la memoria de textura de la GPU, y coincide
+// exactamente con el patrón que describe el bug ("movimientos
+// bruscos"). Ahora, mientras el gesto sigue activo, se vuelve a
+// evaluar el LOD cada ~180ms (no solo al final) para que la resolución
+// de las imágenes vaya bajando EN VIVO a medida que el zoom se aleja,
+// en vez de mantener todo a resolución completa hasta que el usuario
+// suelta los dedos. Es la misma función scheduleLodPass() de siempre
+// (ya cacheada por imgId, ya barata), solo que se le da más
+// oportunidades de correr mientras dura el gesto.
+let zoomingLodInterval = null;
 function markZooming(){
+  const wasAlreadyZooming = document.body.classList.contains('zooming-active');
   document.body.classList.add('zooming-active');
+  if (!wasAlreadyZooming){
+    perfHudBeginGesture();
+    zoomingLodInterval = setInterval(scheduleLodPass, 180);
+  }
   clearTimeout(zoomingRestoreTimer);
   zoomingRestoreTimer = setTimeout(()=>{
     document.body.classList.remove('zooming-active');
+    clearInterval(zoomingLodInterval);
+    zoomingLodInterval = null;
+    perfHudEndGesture();
     // Recién cuando la cámara se queda quieta vale la pena re-evaluar
     // qué imágenes necesitan subir/bajar de resolución (LOD, ver más
     // abajo junto a setImageSrc) — mientras se está paneando/haciendo
@@ -2291,7 +2436,7 @@ function markZooming(){
 function requestTransformUpdate(){
   if (transformDirty) return;
   transformDirty = true;
-  requestAnimationFrame(()=>{
+  requestAnimationFrame((frameTime)=>{
     world.style.transform = `translate3d(${pan.x}px, ${pan.y}px, 0) scale(${zoom})`;
     // Variable CSS con el zoom actual: las manijas de redimensionar
     // (.resize-handle / .container-resize-handle) la usan para
@@ -2304,8 +2449,56 @@ function requestTransformUpdate(){
     positionSelToolbar();
     redrawStrokeCanvasNow();
     transformDirty = false;
+    perfHudTick(frameTime);
   });
 }
+
+// -----------------------------------------------------------------
+// MÉTRICAS DE RENDIMIENTO DEL PELLIZCO (HUD opcional) --------------
+// Requisito: un indicador visible para validar que el zoom rinde bien
+// bajo presión. Mide el tiempo real entre frames consecutivos de
+// requestTransformUpdate mientras dura un gesto (pellizco, rueda+Ctrl
+// o inercia de paneo) y muestra FPS instantáneo + el peor frame
+// (mayor salto entre dos frames) de todo el gesto. Un frame de más de
+// ~33ms (por debajo de 30fps) se resalta en rojo — es la señal de que
+// el navegador está bajo presión real, útil para comparar "antes vs
+// después" de estos cambios en un dispositivo lento. Solo hace
+// trabajo (los getElementById) cuando el HUD está activado en Ajustes
+// Y hay un gesto en curso — en reposo, o con el HUD apagado, el costo
+// es cero.
+let perfHudLastFrameT = 0;
+let perfHudWorstMs = 0;
+let perfHudEls = null;
+function perfHudBeginGesture(){
+  if (!appSettings.perfHud) return;
+  perfHudLastFrameT = 0;
+  perfHudWorstMs = 0;
+  if (!perfHudEls){
+    perfHudEls = {
+      zoom: document.getElementById('perf-hud-zoom'),
+      fps: document.getElementById('perf-hud-fps'),
+      worst: document.getElementById('perf-hud-worst')
+    };
+  }
+}
+function perfHudTick(frameTime){
+  if (!appSettings.perfHud || !perfHudEls) return;
+  if (perfHudLastFrameT){
+    const dt = frameTime - perfHudLastFrameT;
+    if (dt > perfHudWorstMs) perfHudWorstMs = dt;
+    const fps = Math.round(1000 / Math.max(1, dt));
+    perfHudEls.fps.textContent = fps;
+    perfHudEls.fps.className = fps < 30 ? 'perf-bad' : 'perf-good';
+    perfHudEls.worst.textContent = Math.round(perfHudWorstMs) + 'ms';
+    perfHudEls.worst.className = perfHudWorstMs > 33 ? 'perf-bad' : 'perf-good';
+  }
+  perfHudLastFrameT = frameTime;
+  perfHudEls.zoom.textContent = Math.round(zoom * 100) + '%';
+}
+function perfHudEndGesture(){
+  perfHudLastFrameT = 0;
+}
+
 
 // -----------------------------------------------------------------
 // PERSISTENCIA TOTAL — sin viewport culling
@@ -2477,7 +2670,10 @@ viewport.addEventListener('pointerdown', (e) => {
     vpData = {
       dist: Math.hypot(pts[0].x-pts[1].x, pts[0].y-pts[1].y),
       mid: {x:(pts[0].x+pts[1].x)/2, y:(pts[0].y+pts[1].y)/2},
-      zoom0: zoom, pan0: {...pan}
+      zoom0: zoom, pan0: {...pan},
+      // "Último zoom aplicado" — ver PINCH_MAX_STEP_RATIO más abajo,
+      // junto al manejador de pointermove en modo 'pinch'.
+      lastAppliedZoom: zoom
     };
     viewport.classList.remove('panning');
     return;
@@ -2547,9 +2743,35 @@ viewport.addEventListener('pointermove', (e) => {
     const dist = Math.hypot(pts[0].x-pts[1].x, pts[0].y-pts[1].y);
     const mid = {x:(pts[0].x+pts[1].x)/2, y:(pts[0].y+pts[1].y)/2};
     const before = screenToWorld(mid.x, mid.y);
-    // Zoom máximo elevado a 1000% (antes 600%) para poder acercarse mucho
-    // más al detalle de una referencia.
-    zoom = Math.min(MAX_ZOOM, Math.max(MIN_ZOOM, vpData.zoom0 * (dist / vpData.dist)));
+    // -------------------------------------------------------------
+    // FIX DE "MOVIMIENTOS BRUSCOS" (rechazo de picos de sensor) -----
+    // En pantallas táctiles baratas/WebViews, durante un pellizco
+    // rápido con dos dedos es común que UNA sola muestra táctil llegue
+    // con coordenadas erróneas (ruido del digitalizador, o el sistema
+    // operativo entregando varios eventos "coalesced" de golpe tras un
+    // frame perdido) — eso hace que `dist` salte de forma irreal por
+    // UN evento, lo que a su vez le pide al navegador un salto de zoom
+    // igual de irreal en un solo frame. Ese es precisamente el tipo de
+    // salto que satura el compositor y dispara el colapso descrito
+    // (imágenes que parpadean/desaparecen y la interfaz que se ve
+    // corrupta). La solución no es limitar la VELOCIDAD real del
+    // pellizco (eso lo haría sentir con retraso) sino rechazar saltos
+    // de una sola muestra que exceden lo que un dedo humano puede
+    // recorrer entre dos eventos táctiles consecutivos: se limita el
+    // cambio de zoom, por evento, a un máximo de ±18% respecto del
+    // último zoom YA aplicado. Un pellizco real y veloz sigue
+    // alcanzando el tope de zoom en un puñado de milisegundos (llegan
+    // decenas de eventos por segundo), pero un pico aislado de un solo
+    // frame queda recortado a ese ±18% en vez de propagarse entero.
+    const PINCH_MAX_STEP_RATIO = 1.18;
+    const rawTargetZoom = Math.min(MAX_ZOOM, Math.max(MIN_ZOOM, vpData.zoom0 * (dist / vpData.dist)));
+    const lastZoom = vpData.lastAppliedZoom || zoom;
+    zoom = Math.min(
+      lastZoom * PINCH_MAX_STEP_RATIO,
+      Math.max(lastZoom / PINCH_MAX_STEP_RATIO, rawTargetZoom)
+    );
+    zoom = Math.min(MAX_ZOOM, Math.max(MIN_ZOOM, zoom));
+    vpData.lastAppliedZoom = zoom;
     const after = screenToWorld(mid.x, mid.y);
     pan.x += (after.x - before.x) * zoom;
     pan.y += (after.y - before.y) * zoom;
@@ -2753,7 +2975,8 @@ function twoFingerActivate(){
   vpData = {
     dist: Math.hypot(pts[0].x-pts[1].x, pts[0].y-pts[1].y),
     mid: {x:(pts[0].x+pts[1].x)/2, y:(pts[0].y+pts[1].y)/2},
-    zoom0: zoom, pan0: {...pan}
+    zoom0: zoom, pan0: {...pan},
+    lastAppliedZoom: zoom // ver PINCH_MAX_STEP_RATIO junto al pointermove en modo 'pinch'
   };
   viewport.classList.remove('panning');
 }
@@ -2840,6 +3063,19 @@ viewport.addEventListener('wheel', (e) => {
     pan.x += (after.x - before.x) * zoom;
     pan.y += (after.y - before.y) * zoom;
   } else {
+    // FIX DE PARPADEO al desplazarse lejos y volver con el trackpad/rueda:
+    // este era el ÚNICO de los tres modos de mover la cámara (pan táctil,
+    // pinch, y este) que NO llamaba a markZooming(). Sin eso, el navegador
+    // seguía recalculando el hit-testing de TODAS las capas superpuestas
+    // en cada frame del gesto — exactamente el trabajo doble que el resto
+    // del código ya identificó como la causa del parpadeo (ver el
+    // comentario grande junto a markZooming() más arriba). Con distancias
+    // largas (ir a ver algo lejano y volver) este gesto es justo el que
+    // más frames sostenidos genera, así que era el que más se notaba.
+    // Ahora usa la misma optimización que el resto: se desactivan los
+    // eventos de puntero sobre el contenido mientras dura el desplazamiento
+    // y se reactivan solos ~160ms después del último evento de rueda.
+    markZooming();
     pan.x -= e.deltaX;
     pan.y -= e.deltaY;
   }
@@ -4895,7 +5131,22 @@ function ensureHandles(){
       function flush(){
         raf = null;
         const ev = lastEv;
-        const dx = (ev.clientX-start.x)/zoom, dy=(ev.clientY-start.y)/zoom;
+        // ANTES: dx/dy se dividían por el zoom actual (`/zoom`). Eso
+        // convertía el arrastre en unidades de mundo relativas a CADA
+        // nivel de zoom — el mismo gesto de dedo/mouse cambiaba el
+        // tamaño REAL (en unidades de mundo, lo que en definitiva
+        // determina el tamaño relativo entre imágenes) mucho más si
+        // estabas alejado (zoom bajo) y mucho menos si estabas
+        // acercado (zoom alto). Resultado: el usuario terminaba con
+        // imágenes gigantes o diminutas respecto a las demás sin
+        // darse cuenta, solo por el nivel de zoom en el que redimensionó.
+        // Ahora el delta se toma tal cual en píxeles de pantalla, SIN
+        // dividir por el zoom — o sea, se calcula siempre como si se
+        // estuviera al 100% (zoom=1). Así el mismo gesto produce
+        // siempre el mismo cambio de tamaño real, sin importar a qué
+        // zoom estés mirando el lienzo en ese momento, y la relación de
+        // escala entre imágenes queda consistente a partir del 100%.
+        const dx = (ev.clientX-start.x), dy = (ev.clientY-start.y);
         const sx = pos.includes('w') ? -1 : 1;
         const sy = pos.includes('n') ? -1 : 1;
 
@@ -6083,9 +6334,13 @@ async function loadBoard(id){
     const data = await metaGet('boarddata:' + id);
     if (!data || !meta){ toast('No se encontró el tablero'); return; }
     if (data.pan) pan = data.pan;
-    if (Number.isFinite(data.zoom) && data.zoom > 0){
-      zoom = Math.min(MAX_ZOOM, Math.max(MIN_ZOOM, data.zoom));
-    }
+    // Zoom SIEMPRE a 100% al abrir un tablero guardado desde el menú,
+    // sin importar el nivel de zoom con el que se había guardado —
+    // mismo criterio que restoreAutosave (ver nota junto a `globalLock`
+    // más arriba): evita arrancar la vista en un zoom extremo, que es
+    // justo donde el contenido tiene más chances de verse a medio
+    // cargar o parpadear mientras termina de montarse.
+    zoom = 1;
     requestTransformUpdate();
     await replaceElements(data.elements || [], data.connections || []);
     loadStrokesFromSave(data.strokes);
@@ -6234,14 +6489,11 @@ async function restoreAutosave(){
     //    100% calculado (posiciones, tamaños, zoom e imágenes), sin
     //    parpadeos ni recortes visuales de por medio.
     if (data.pan) pan = data.pan;
-    if (isFreshLaunch){
-      // Arranque desde cero (app cerrada del todo y reabierta): el pan
-      // guardado se respeta (mantiene dónde estaba el tablero), pero el
-      // zoom se fuerza a 100% sin importar en qué nivel se había quedado.
-      zoom = 1;
-    } else if (Number.isFinite(data.zoom) && data.zoom > 0){
-      zoom = Math.min(MAX_ZOOM, Math.max(MIN_ZOOM, data.zoom));
-    }
+    // Zoom SIEMPRE a 100% al arrancar/recargar el programa (ver nota
+    // junto a la declaración de `globalLock` más arriba) — se ignora
+    // por completo el zoom que venía guardado en el autoguardado. El
+    // pan sí se respeta, para no perder la posición de cámara.
+    zoom = 1;
     requestTransformUpdate();
     await replaceElements(data.elements || [], data.connections || []);
     loadStrokesFromSave(data.strokes);
@@ -7006,7 +7258,8 @@ const DEFAULT_SETTINGS = {
   includeHash: true,    // Interruptor "Activo por defecto" — copia el color con "#" al principio
   zoomBar: true,         // Interruptor "Activo por defecto" — barra flotante de zoom (−, +, %, centrar)
   toolbarLeft: false,    // Por defecto la barra de herramientas principal va arriba; true = flota a la izquierda
-  showLogo: true          // Interruptor "Activo por defecto" — logotipo/marca "Ref Canvas" (#topbar)
+  showLogo: true,          // Interruptor "Activo por defecto" — logotipo/marca "Ref Canvas" (#topbar)
+  perfHud: false          // Interruptor "Métricas de rendimiento (zoom)" — HUD de FPS/peor-frame, apagado por defecto
 };
 let appSettings = Object.assign({}, DEFAULT_SETTINGS);
 
@@ -7053,6 +7306,7 @@ function applySettings(){
   document.body.classList.toggle('hide-zoom-bar', !appSettings.zoomBar);
   document.body.classList.toggle('toolbar-left', !!appSettings.toolbarLeft);
   document.body.classList.toggle('hide-brand-logo', !appSettings.showLogo);
+  document.body.classList.toggle('show-perf-hud', !!appSettings.perfHud);
   updateActionCapsuleOverflow();
 
   const bg = BG_PRESETS[appSettings.bgPreset] || BG_PRESETS.original;
@@ -7088,6 +7342,7 @@ function syncSettingsUI(){
   const zoomBarEl = document.getElementById('setting-zoom-bar');
   const toolbarLeftEl = document.getElementById('setting-toolbar-left');
   const showLogoEl = document.getElementById('setting-show-logo');
+  const perfHudEl = document.getElementById('setting-perf-hud');
   if (bgTextureEl) bgTextureEl.checked = !!appSettings.bgTexture;
   if (crossEl) crossEl.checked = !!appSettings.centerCross;
   if (imgBoxEl) imgBoxEl.checked = !!appSettings.imgBox;
@@ -7096,6 +7351,7 @@ function syncSettingsUI(){
   if (zoomBarEl) zoomBarEl.checked = !!appSettings.zoomBar;
   if (toolbarLeftEl) toolbarLeftEl.checked = !!appSettings.toolbarLeft;
   if (showLogoEl) showLogoEl.checked = !!appSettings.showLogo;
+  if (perfHudEl) perfHudEl.checked = !!appSettings.perfHud;
   document.querySelectorAll('#bg-color-options .settings-swatch').forEach(b=>{
     b.classList.toggle('active', b.dataset.bg === appSettings.bgPreset);
   });
@@ -7147,6 +7403,7 @@ document.getElementById('setting-include-hash').onchange = (e)=>{ appSettings.in
 document.getElementById('setting-zoom-bar').onchange = (e)=>{ appSettings.zoomBar = e.target.checked; applySettings(); saveSettings(); };
 document.getElementById('setting-toolbar-left').onchange = (e)=>{ appSettings.toolbarLeft = e.target.checked; applySettings(); saveSettings(); };
 document.getElementById('setting-show-logo').onchange = (e)=>{ appSettings.showLogo = e.target.checked; applySettings(); saveSettings(); };
+document.getElementById('setting-perf-hud').onchange = (e)=>{ appSettings.perfHud = e.target.checked; applySettings(); saveSettings(); };
 document.querySelectorAll('#bg-color-options [data-bg]').forEach(b=>{
   b.onclick = () => { appSettings.bgPreset = b.dataset.bg; applySettings(); saveSettings(); };
 });
@@ -7170,18 +7427,6 @@ if (!('indexedDB' in window)){
   hideLoadingOverlay();
 } else {
   restoreAutosave();
-}
-
-if ('serviceWorker' in navigator){
-  window.addEventListener('load', () => {
-    navigator.serviceWorker.register('service-worker.js').catch(()=>{});
-  });
-}
-
-// Pide al sistema que NO borre automáticamente los datos guardados
-// cuando el celular ande corto de espacio (reduce riesgo de pérdida).
-if (navigator.storage && navigator.storage.persist){
-  navigator.storage.persist().catch(()=>{});
 }
 })();
 </script>
