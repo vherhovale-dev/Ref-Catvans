@@ -576,6 +576,20 @@
   #sel-toolbar, #node-controls, #pencil-panel{
     transform:translateZ(0); will-change:transform; contain:paint;}
 
+  /* FIX: mientras el candado o el ojo flotan solos (ver más abajo,
+     body.global-lock / body.ui-hidden), #action-capsule sigue siendo
+     su "containing block" por el transform/contain de la regla de
+     arriba — y contain:paint recorta cualquier pintado a los límites
+     de la cápsula original, así que el círculo del botón flotante
+     quedaba cortado a la altura de esa cápsula (invisible) en vez de
+     dibujarse completo. Como la cápsula ya está oculta del todo en
+     esos modos (visibility:hidden, ver reglas de candado/ojo), quitarle
+     el aislamiento de capa ahí no genera ningún parpadeo visible y
+     libera al botón para posicionarse contra el viewport real. */
+  body.global-lock #action-capsule,
+  body.ui-hidden #action-capsule{
+    contain:none; transform:none; will-change:auto;}
+
   /* ---- panel inferior derecho: zoom ---- */
   #bottom-controls{position:fixed;bottom:calc(25px + env(safe-area-inset-bottom));
     right:calc(25px + env(safe-area-inset-right));z-index:46;
@@ -587,22 +601,6 @@
   #zoomctl .pct{font-family:var(--font-mono);font-size:var(--fs-small);color:var(--ink-dim);min-width:46px;text-align:center;flex-shrink:0;}
   body.hide-zoom-bar #zoomctl{display:none !important;}
 
-  /* ---- HUD de métricas de rendimiento del pellizco (opcional, ver
-     Ajustes > Interfaz > "Métricas de rendimiento"). Vive fuera de
-     #world (no viaja con el pan/zoom) y en su propia capa aislada por
-     la regla de arriba, así medir el rendimiento nunca puede volverse
-     parte del problema que está midiendo. ---- */
-  #perf-hud{position:fixed;top:calc(14px + env(safe-area-inset-top));
-    left:50%;transform:translate(-50%,0) translateZ(0);z-index:200;
-    display:none;align-items:center;gap:10px;pointer-events:none;
-    background:var(--panel);border:1px solid var(--line);border-radius:999px;
-    padding:5px 14px;box-shadow:var(--shadow);
-    font-family:var(--font-mono);font-size:11px;color:var(--ink-dim);
-    white-space:nowrap;contain:paint;}
-  #perf-hud b{color:var(--ink);font-weight:600;}
-  #perf-hud .perf-good{color:#5cb85c;}
-  #perf-hud .perf-bad{color:#d95f5f;}
-  body.show-perf-hud #perf-hud{display:flex;}
   /* Panel de Configuración > "Logotipo Ref Canvas". Activo (mostrar
      logo) por defecto; al desactivarlo, oculta por completo #topbar
      (la marca/logo de la app), sin afectar al resto de la interfaz. */
@@ -1285,12 +1283,6 @@
   <button id="exp-import">📂 Importar tablero (.json)</button>
 </div>
 
-<div id="perf-hud" aria-hidden="true">
-  <span>zoom <b id="perf-hud-zoom">100%</b></span>
-  <span>fps <b id="perf-hud-fps">--</b></span>
-  <span>peor frame <b id="perf-hud-worst">--</b></span>
-</div>
-
 <div id="bottom-controls">
   <div id="zoomctl">
     <button class="btn icon-only" id="zoom-out">−</button>
@@ -1397,11 +1389,6 @@
   <div class="settings-row">
     <div class="settings-row-label"><span>Logotipo "Ref Canvas"</span><small>Desactivalo para ocultar por completo el nombre/marca de la app de la interfaz</small></div>
     <label class="switch"><input type="checkbox" id="setting-show-logo"><span class="switch-track"></span></label>
-  </div>
-
-  <div class="settings-row">
-    <div class="settings-row-label"><span>Métricas de rendimiento (zoom)</span><small>Muestra un indicador flotante con FPS y el peor frame durante el pellizco, para validar que el zoom rinda bien</small></div>
-    <label class="switch"><input type="checkbox" id="setting-perf-hud"><span class="switch-track"></span></label>
   </div>
 
   <div style="height:1px;background:var(--line);margin:6px 0;"></div>
@@ -2434,7 +2421,6 @@ function markZooming(){
   const wasAlreadyZooming = document.body.classList.contains('zooming-active');
   document.body.classList.add('zooming-active');
   if (!wasAlreadyZooming){
-    perfHudBeginGesture();
     zoomingLodInterval = setInterval(scheduleLodPass, 180);
   }
   clearTimeout(zoomingRestoreTimer);
@@ -2442,7 +2428,6 @@ function markZooming(){
     document.body.classList.remove('zooming-active');
     clearInterval(zoomingLodInterval);
     zoomingLodInterval = null;
-    perfHudEndGesture();
     // Recién cuando la cámara se queda quieta vale la pena re-evaluar
     // qué imágenes necesitan subir/bajar de resolución (LOD, ver más
     // abajo junto a setImageSrc) — mientras se está paneando/haciendo
@@ -2467,56 +2452,8 @@ function requestTransformUpdate(){
     positionSelToolbar();
     redrawStrokeCanvasNow();
     transformDirty = false;
-    perfHudTick(frameTime);
   });
 }
-
-// -----------------------------------------------------------------
-// MÉTRICAS DE RENDIMIENTO DEL PELLIZCO (HUD opcional) --------------
-// Requisito: un indicador visible para validar que el zoom rinde bien
-// bajo presión. Mide el tiempo real entre frames consecutivos de
-// requestTransformUpdate mientras dura un gesto (pellizco, rueda+Ctrl
-// o inercia de paneo) y muestra FPS instantáneo + el peor frame
-// (mayor salto entre dos frames) de todo el gesto. Un frame de más de
-// ~33ms (por debajo de 30fps) se resalta en rojo — es la señal de que
-// el navegador está bajo presión real, útil para comparar "antes vs
-// después" de estos cambios en un dispositivo lento. Solo hace
-// trabajo (los getElementById) cuando el HUD está activado en Ajustes
-// Y hay un gesto en curso — en reposo, o con el HUD apagado, el costo
-// es cero.
-let perfHudLastFrameT = 0;
-let perfHudWorstMs = 0;
-let perfHudEls = null;
-function perfHudBeginGesture(){
-  if (!appSettings.perfHud) return;
-  perfHudLastFrameT = 0;
-  perfHudWorstMs = 0;
-  if (!perfHudEls){
-    perfHudEls = {
-      zoom: document.getElementById('perf-hud-zoom'),
-      fps: document.getElementById('perf-hud-fps'),
-      worst: document.getElementById('perf-hud-worst')
-    };
-  }
-}
-function perfHudTick(frameTime){
-  if (!appSettings.perfHud || !perfHudEls) return;
-  if (perfHudLastFrameT){
-    const dt = frameTime - perfHudLastFrameT;
-    if (dt > perfHudWorstMs) perfHudWorstMs = dt;
-    const fps = Math.round(1000 / Math.max(1, dt));
-    perfHudEls.fps.textContent = fps;
-    perfHudEls.fps.className = fps < 30 ? 'perf-bad' : 'perf-good';
-    perfHudEls.worst.textContent = Math.round(perfHudWorstMs) + 'ms';
-    perfHudEls.worst.className = perfHudWorstMs > 33 ? 'perf-bad' : 'perf-good';
-  }
-  perfHudLastFrameT = frameTime;
-  perfHudEls.zoom.textContent = Math.round(zoom * 100) + '%';
-}
-function perfHudEndGesture(){
-  perfHudLastFrameT = 0;
-}
-
 
 // -----------------------------------------------------------------
 // PERSISTENCIA TOTAL — sin viewport culling
@@ -7276,8 +7213,7 @@ const DEFAULT_SETTINGS = {
   includeHash: true,    // Interruptor "Activo por defecto" — copia el color con "#" al principio
   zoomBar: true,         // Interruptor "Activo por defecto" — barra flotante de zoom (−, +, %, centrar)
   toolbarLeft: false,    // Por defecto la barra de herramientas principal va arriba; true = flota a la izquierda
-  showLogo: true,          // Interruptor "Activo por defecto" — logotipo/marca "Ref Canvas" (#topbar)
-  perfHud: false          // Interruptor "Métricas de rendimiento (zoom)" — HUD de FPS/peor-frame, apagado por defecto
+  showLogo: true          // Interruptor "Activo por defecto" — logotipo/marca "Ref Canvas" (#topbar)
 };
 let appSettings = Object.assign({}, DEFAULT_SETTINGS);
 
@@ -7324,7 +7260,6 @@ function applySettings(){
   document.body.classList.toggle('hide-zoom-bar', !appSettings.zoomBar);
   document.body.classList.toggle('toolbar-left', !!appSettings.toolbarLeft);
   document.body.classList.toggle('hide-brand-logo', !appSettings.showLogo);
-  document.body.classList.toggle('show-perf-hud', !!appSettings.perfHud);
   updateActionCapsuleOverflow();
 
   const bg = BG_PRESETS[appSettings.bgPreset] || BG_PRESETS.original;
@@ -7360,7 +7295,6 @@ function syncSettingsUI(){
   const zoomBarEl = document.getElementById('setting-zoom-bar');
   const toolbarLeftEl = document.getElementById('setting-toolbar-left');
   const showLogoEl = document.getElementById('setting-show-logo');
-  const perfHudEl = document.getElementById('setting-perf-hud');
   if (bgTextureEl) bgTextureEl.checked = !!appSettings.bgTexture;
   if (crossEl) crossEl.checked = !!appSettings.centerCross;
   if (imgBoxEl) imgBoxEl.checked = !!appSettings.imgBox;
@@ -7369,7 +7303,6 @@ function syncSettingsUI(){
   if (zoomBarEl) zoomBarEl.checked = !!appSettings.zoomBar;
   if (toolbarLeftEl) toolbarLeftEl.checked = !!appSettings.toolbarLeft;
   if (showLogoEl) showLogoEl.checked = !!appSettings.showLogo;
-  if (perfHudEl) perfHudEl.checked = !!appSettings.perfHud;
   document.querySelectorAll('#bg-color-options .settings-swatch').forEach(b=>{
     b.classList.toggle('active', b.dataset.bg === appSettings.bgPreset);
   });
@@ -7421,7 +7354,6 @@ document.getElementById('setting-include-hash').onchange = (e)=>{ appSettings.in
 document.getElementById('setting-zoom-bar').onchange = (e)=>{ appSettings.zoomBar = e.target.checked; applySettings(); saveSettings(); };
 document.getElementById('setting-toolbar-left').onchange = (e)=>{ appSettings.toolbarLeft = e.target.checked; applySettings(); saveSettings(); };
 document.getElementById('setting-show-logo').onchange = (e)=>{ appSettings.showLogo = e.target.checked; applySettings(); saveSettings(); };
-document.getElementById('setting-perf-hud').onchange = (e)=>{ appSettings.perfHud = e.target.checked; applySettings(); saveSettings(); };
 document.querySelectorAll('#bg-color-options [data-bg]').forEach(b=>{
   b.onclick = () => { appSettings.bgPreset = b.dataset.bg; applySettings(); saveSettings(); };
 });
