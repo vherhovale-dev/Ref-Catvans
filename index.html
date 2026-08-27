@@ -5,7 +5,14 @@
 <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover">
 <meta name="mobile-web-app-capable" content="yes">
 <meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="apple-mobile-web-app-title" content="Tablero">
+<meta name="theme-color" content="#161514">
 <title>Tablero — Referencias</title>
+<link rel="manifest" href="manifest.json">
+<link rel="icon" type="image/png" sizes="192x192" href="icon-192.png">
+<link rel="icon" type="image/png" sizes="512x512" href="icon-512.png">
+<link rel="apple-touch-icon" href="icon-192.png">
 <style>
   :root{
     --bg-0:#161514;
@@ -7429,6 +7436,19 @@ if (!('indexedDB' in window)){
   restoreAutosave();
 }
 })();
+</script>
+<script>
+  // Registro del service worker para habilitar la PWA (funcionamiento offline
+  // e instalación en el dispositivo). Se hace fuera del IIFE principal y
+  // recién al terminar de cargar la página para no competir con el resto
+  // del arranque de la app.
+  if ('serviceWorker' in navigator){
+    window.addEventListener('load', () => {
+      navigator.serviceWorker.register('service-worker.js').catch(err => {
+        console.warn('No se pudo registrar el service worker:', err);
+      });
+    });
+  }
 </script>
 </body>
 </html>
