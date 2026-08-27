@@ -1,0 +1,7 @@
+      "relation": ["delegate_permission/common.handle_all_urls"],
+      "target": {
+        "namespace": "android_app",
+        "package_name": "io.github.vherhovale_dev.twa",
+        "sha256_cert_fingerprints": ["03:0D:51:48:32:5C:64:AD:1B:5E:51:4A:22:44:2D:C6:6B:20:19:55:2D:9E:B4:0B:A1:34:EF:16:E7:05:8B:4A"]
+      }
+    }]
