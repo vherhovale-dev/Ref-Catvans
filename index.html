@@ -87,7 +87,7 @@
   #loading-overlay{position:fixed;inset:0;z-index:9999;
     background:rgba(10,9,8,.74);backdrop-filter:blur(2px);-webkit-backdrop-filter:blur(2px);
     display:flex;align-items:center;justify-content:center;
-    transition:opacity .28s ease;opacity:1;}
+    transition:opacity .28s ease;opacity:1;pointer-events:auto;}
   #loading-overlay.hide{opacity:0;pointer-events:none;}
   .loading-box{display:flex;flex-direction:column;align-items:center;gap:13px;
     color:var(--ink-dim);font:600 13px var(--font-ui, sans-serif);letter-spacing:.03em;}
@@ -95,6 +95,13 @@
     border:3px solid rgba(236,231,222,.15);border-top-color:var(--accent, #d9a441);
     animation:loadingSpin .8s linear infinite;}
   @keyframes loadingSpin{to{transform:rotate(360deg);}}
+  /* Bloqueo absoluto de interacción (semáforo de carga): además del
+     bloqueo real a nivel JS (ver isLoadingLocked/setLoadingLocked), el
+     cursor de espera refuerza visualmente que el tablero está inerte —
+     ni pan, ni zoom, ni ningún botón responden mientras esta clase esté
+     puesta en <body>. */
+  body.loading-locked, body.loading-locked *{cursor:wait !important;}
+  body.loading-locked #viewport{touch-action:none;}
 
   /* ---- canvas / world ---- */
   #viewport{position:fixed;inset:0;width:100%;height:100vh;height:100dvh;overflow:hidden;touch-action:none;cursor:grab;
@@ -1338,6 +1345,34 @@ try{
   sessionStorage.setItem(FRESH_LAUNCH_KEY, '1');
 }catch(_){ /* sessionStorage no disponible (modo privado, etc.): se asume arranque fresco */ }
 let globalLock = false; // Modo Candado Global: bloquea toda interacción con imágenes/notas, solo permite pan/zoom
+
+// -----------------------------------------------------------------
+// BLOQUEO ABSOLUTO DE INTERACCIÓN (semáforo de la pantalla de carga)
+// -----------------------------------------------------------------
+// Mientras isLoadingLocked es true (pantalla de carga visible — ver
+// showLoadingOverlay/hideLoadingOverlay más abajo), esta única tanda de
+// escuchas en fase de CAPTURA sobre window se ejecuta ANTES que
+// cualquier otro listener del programa — incluidos los de pan/zoom en
+// #viewport, los atajos de teclado y los botones de la interfaz — y
+// frena en seco el evento (stopPropagation + preventDefault). Así es
+// físicamente imposible mover, escalar, seleccionar o tocar nada del
+// tablero mientras el contenido todavía se está terminando de montar y
+// decodificar (ver ensureAllElementsLoaded), sin tener que acordarse de
+// agregar un chequeo manual en cada gesto/atajo existente uno por uno.
+let isLoadingLocked = false;
+function setLoadingLocked(v){
+  isLoadingLocked = v;
+  document.body.classList.toggle('loading-locked', v);
+}
+['pointerdown','pointermove','pointerup','pointercancel','wheel','keydown',
+ 'touchstart','touchmove','touchend','gesturestart','gesturechange','click']
+  .forEach(type=>{
+    window.addEventListener(type, (e)=>{
+      if (!isLoadingLocked) return;
+      e.stopPropagation();
+      if (e.cancelable) e.preventDefault();
+    }, {capture:true, passive:false});
+  });
 let selectMode = false; // Modo selección múltiple por toque: arrastrar sobre el canvas dibuja un lazo en vez de hacer pan
 let nodeMode = false;      // Modo nodos: tocar dos elementos los conecta con una línea
 let nodePendingId = null;  // primer elemento elegido en modo nodos, esperando el segundo
@@ -2251,118 +2286,84 @@ function requestTransformUpdate(){
     positionSelToolbar();
     redrawStrokeCanvasNow();
     transformDirty = false;
-    scheduleCulling();
   });
 }
 
 // -----------------------------------------------------------------
-// VIEWPORT CULLING (virtualización del lienzo)
+// PERSISTENCIA TOTAL — sin viewport culling
 // -----------------------------------------------------------------
-// Problema que resuelve: con tableros grandes (muchas imágenes) y/o
-// zoom muy alto, crear y montar en el DOM todos los elementos de golpe
-// hace que el navegador tenga que decodificar y subir a la GPU todas
-// esas texturas al mismo tiempo → colapso del búfer de texturas
-// (imágenes rotas / a franjas), sobre todo en WebViews con memoria de
-// GPU limitada.
+// Regla absoluta: una vez cargado, TODO el contenido del tablero queda
+// montado en el DOM y decodificado de forma permanente, sin importar
+// el zoom, el pan o la distancia a la cámara. Nada se oculta ni se
+// desmonta jamás por estar fuera de vista.
 //
-// Solución: cada elemento (imagen, nota o Frame) solo existe MONTADO
-// en el DOM (dentro de #world) mientras su AABB (bounding box) cae
-// dentro del área visible de la cámara + un margen de "overscan". El
-// resto del tiempo su nodo permanece cacheado en `domMap` (nunca se
-// destruye ni se le borra el `src` de la imagen), simplemente
-// desconectado del árbol del DOM — así el navegador libera la capa de
-// composición/textura GPU asociada, pero el recurso decodificado sigue
-// disponible en memoria para cuando el elemento vuelva a entrar en
-// cuadro (ver mountElement/unmountElement).
-const mountedIds = new Set(); // ids actualmente adjuntos a #world
-
-// Margen de precarga: fracción extra del viewport (a cada lado) que se
-// considera "visible" para el culling. Con 0.5 se precargan ~medio
-// viewport de más por lado, así los elementos llegan ya listos cuando
-// entran en cuadro al mover la cámara, sin parpadeos.
-const CULL_OVERSCAN_RATIO = 0.5;
-
-// AABB (Axis-Aligned Bounding Box) del elemento en coordenadas de
-// mundo. Si el elemento está rotado, se calcula el rectángulo alineado
-// a los ejes que efectivamente lo envuelve (más grande que w×h), para
-// que la comprobación geométrica nunca oculte por error una esquina
-// que sí está en pantalla.
-function elementWorldAABB(el){
-  const rot = Number(el.rot) || 0;
-  if (!rot){
-    return { minX: el.x, minY: el.y, maxX: el.x + el.w, maxY: el.y + el.h };
+// La única precaución real que hace falta (para que "cargar todo de
+// una" no colapse el búfer de texturas del WebView con tableros
+// grandes a zoom alto) es CÓMO se decodifican las imágenes al
+// restaurar una sesión entera: no todas de golpe en el mismo ciclo,
+// sino en tandas chicas con un respiro de un frame entre cada una
+// (ver loadImagesInSafeBatches más abajo). Eso no oculta ni desmonta
+// nada — solo escalona el ORDEN en que se le pide al navegador que
+// decodifique, y la pantalla de carga permanece activa hasta que la
+// última imagen del tablero, esté donde esté, terminó de decodificar.
+const IMAGE_LOAD_BATCH_SIZE = 4;
+function nextFrame(){ return new Promise(r => requestAnimationFrame(r)); }
+async function loadImagesInSafeBatches(pendingImages){
+  for (let i = 0; i < pendingImages.length; i += IMAGE_LOAD_BATCH_SIZE){
+    const batch = pendingImages.slice(i, i + IMAGE_LOAD_BATCH_SIZE);
+    await Promise.allSettled(batch.map(({node, imgId}) => setImageSrc(node, imgId)));
+    await nextFrame();
   }
-  const cx = el.x + el.w / 2, cy = el.y + el.h / 2;
-  const rad = rot * Math.PI / 180;
-  const cos = Math.abs(Math.cos(rad)), sin = Math.abs(Math.sin(rad));
-  const hw = el.w / 2, hh = el.h / 2;
-  const bw = hw * cos + hh * sin, bh = hw * sin + hh * cos;
-  return { minX: cx - bw, minY: cy - bh, maxX: cx + bw, maxY: cy + bh };
+}
+function forceFullRepaint(){
+  // "Nudge" del compositor: sacar y volver a poner la capa GPU de
+  // #world fuerza un rasterizado nuevo y descarta cualquier tile
+  // gráfico corrupto que haya quedado cacheado de antes.
+  world.style.willChange = 'auto';
+  void world.offsetHeight; // fuerza un reflow síncrono entre los dos cambios
+  world.style.willChange = 'transform';
+  requestTransformUpdate();
 }
 
-// Rectángulo (en coordenadas de mundo) del área visible actual de la
-// cámara, expandido por el margen de overscan.
-function getCullingRect(){
-  const overW = innerWidth * CULL_OVERSCAN_RATIO;
-  const overH = innerHeight * CULL_OVERSCAN_RATIO;
-  const minXs = -overW, minYs = -overH;
-  const maxXs = innerWidth + overW, maxYs = innerHeight + overH;
-  return {
-    minX: (minXs - pan.x) / zoom, minY: (minYs - pan.y) / zoom,
-    maxX: (maxXs - pan.x) / zoom, maxY: (maxYs - pan.y) / zoom
-  };
-}
-
-// Comprobación geométrica rápida de intersección entre dos AABB.
-function aabbIntersects(a, b){
-  return a.minX <= b.maxX && a.maxX >= b.minX && a.minY <= b.maxY && a.maxY >= b.minY;
-}
-
-// Adjunta (o crea, si es la primera vez que se ve) el nodo del
-// elemento. Si el nodo ya existía cacheado en `domMap` desde un
-// culling previo, sólo se reinserta en el DOM — el <img> conserva su
-// `src` intacto, así el navegador reutiliza el recurso/textura ya
-// cargado en vez de descargarlo o decodificarlo de nuevo desde cero.
-function mountElement(el){
-  const node = domMap.get(el.id);
-  if (!node) return renderElement(el); // primera vez: crea, adjunta y cachea
-  if (!mountedIds.has(el.id)){
-    world.appendChild(node);
-    mountedIds.add(el.id);
-  }
-  return Promise.resolve();
-}
-
-// Desconecta el nodo del DOM sin destruirlo: libera la capa de
-// composición/textura GPU del elemento, pero el nodo (y el recurso ya
-// decodificado de su imagen) se mantiene cacheado en `domMap` para una
-// reinserción instantánea cuando vuelva a ser visible.
-function unmountElement(el){
-  if (!mountedIds.has(el.id)) return;
-  const node = domMap.get(el.id);
-  if (node) node.remove();
-  mountedIds.delete(el.id);
-}
-
-let cullRAF = null;
-function scheduleCulling(){
-  if (cullRAF) return;
-  cullRAF = requestAnimationFrame(()=>{
-    cullRAF = null;
-    runViewportCulling();
+// -----------------------------------------------------------------
+// CARGA GLOBAL INCONDICIONAL (parte del semáforo de bloqueo total)
+// -----------------------------------------------------------------
+// Se usa en los momentos "críticos" donde NINGÚN elemento del tablero
+// puede arriesgarse a aparecer roto/gris más adelante: abrir un
+// tablero guardado desde el menú, y volver la app al primer plano
+// después de estar en segundo plano. Decodifica TODOS los elementos,
+// estén o no dentro del encuadre actual — y solo cuando esta promesa
+// termina se libera el bloqueo de interacción (ver
+// showLoadingOverlay/hideLoadingOverlay, que envuelven cada llamador).
+async function ensureAllElementsLoaded(){
+  // Fase 1 — asegurar que TODO elemento tenga su nodo creado y
+  // montado en #world (con persistencia total, esto ya debería ser
+  // siempre así — pero por si algún elemento llegó a agregarse al
+  // arreglo `elements` sin pasar por renderElement, esto lo cubre).
+  await Promise.allSettled(elements.map(el => {
+    if (!domMap.get(el.id)) return renderElement(el);
+    return Promise.resolve();
+  }));
+  // Fase 2 — redecodificar: por si algún <img> ya tenía el src puesto
+  // desde antes pero el navegador descartó el bitmap ya decodificado
+  // mientras la app estaba en segundo plano (frecuente en WebViews con
+  // poca memoria de GPU — así aparecen los bloques grises, las franjas
+  // o las imágenes "rotas"), se le vuelve a pedir decode() a CADA
+  // imagen del tablero. decode() no exige que el elemento esté
+  // conectado al documento, así que esto cubre también lo que está
+  // lejos, fuera del encuadre actual. Es seguro llamarlo de nuevo: si
+  // el bitmap ya está listo, la promesa resuelve al instante.
+  const decodePromises = [];
+  domMap.forEach(node=>{
+    const img = node && node.querySelector && node.querySelector('img');
+    if (img && img.src && typeof img.decode === 'function'){
+      decodePromises.push(img.decode().catch(()=>{}));
+    }
   });
-}
-
-// Bucle de renderizado del culling: una comprobación AABB por
-// elemento (operación aritmética barata, incluso con miles de
-// elementos) decide si debe estar montado en el DOM o hibernado.
-function runViewportCulling(){
-  const rect = getCullingRect();
-  for (const el of elements){
-    const visible = aabbIntersects(elementWorldAABB(el), rect);
-    if (visible) mountElement(el);
-    else unmountElement(el);
-  }
+  await Promise.allSettled(decodePromises);
+  // Fase 3 — con TODO garantizado en memoria y montado, se fuerza un
+  // repintado completo para limpiar cualquier resto de búfer corrupto.
+  forceFullRepaint();
 }
 function screenToWorld(sx, sy){
   return { x: (sx - pan.x) / zoom, y: (sy - pan.y) / zoom };
@@ -3051,6 +3052,15 @@ document.getElementById('btn-add-note').onclick = addNoteElement;
 // ---------------------------------------------------------------
 const domMap = new Map(); // id -> dom node
 
+// Bandera usada SOLO por replaceElements (restauración masiva de un
+// tablero entero) para diferir la decodificación de imágenes y
+// procesarla después en tandas chicas (ver loadImagesInSafeBatches).
+// El resto de los usos normales de renderElement (agregar una imagen
+// nueva sola, etc.) no la tocan y siguen cargando al toque como
+// siempre. Esto NO oculta ni desmonta nada — el nodo se crea y monta
+// en el DOM igual que siempre, lo único que se pospone es el momento
+// en que se le pide al navegador que decodifique la imagen.
+let __pendingImageBatch = null;
 function renderElement(el){
   let node = domMap.get(el.id);
   let loadPromise = null;
@@ -3060,7 +3070,13 @@ function renderElement(el){
     node.dataset.id = el.id;
     if (el.type === 'image'){
       node.innerHTML = `<img draggable="false" decoding="async"><div class="lock-badge">${ICONS.lock}</div>`;
-      loadPromise = setImageSrc(node.querySelector('img'), el.imgId);
+      const imgNode = node.querySelector('img');
+      if (__pendingImageBatch){
+        imgNode.classList.add('loading');
+        __pendingImageBatch.push({ node: imgNode, imgId: el.imgId });
+      } else {
+        loadPromise = setImageSrc(imgNode, el.imgId);
+      }
     } else {
       node.innerHTML = `<textarea placeholder="Escribí una nota…" maxlength="600"></textarea><div class="lock-badge">${ICONS.lock}</div>`;
       const ta = node.querySelector('textarea');
@@ -3079,7 +3095,6 @@ function renderElement(el){
     });
     world.appendChild(node);
     domMap.set(el.id, node);
-    mountedIds.add(el.id);
   }
   positionNode(el, node);
   return loadPromise || Promise.resolve();
@@ -3678,7 +3693,6 @@ function handleToolbarAction(act){
     ids.forEach(id=>{
       domMap.get(id)?.remove();
       domMap.delete(id);
-      mountedIds.delete(id);
       elements = elements.filter(e=>e.id!==id);
     });
     selected.clear();
@@ -3852,7 +3866,6 @@ function handleImageConfigAction(el, act){
     if (confirm('¿Eliminar esta imagen del tablero?')){
       domMap.get(el.id)?.remove();
       domMap.delete(el.id);
-      mountedIds.delete(el.id);
       elements = elements.filter(e => e.id !== el.id);
       selected.clear();
       updateEmptyHint();
@@ -5144,6 +5157,7 @@ document.getElementById('importinput').onchange = (e)=>{
   if (!file) return;
   const reader = new FileReader();
   reader.onload = async (ev)=>{
+    showLoadingOverlay();
     try{
       const data = JSON.parse(ev.target.result);
       // v2: trae un mapa images{imgId: base64} -> restaurarlo en IndexedDB
@@ -5164,11 +5178,18 @@ document.getElementById('importinput').onchange = (e)=>{
       loadStrokesFromSave(data.strokes);
       currentBoardName = data.name || null;
       updateBrandLabel();
+      // Carga global incondicional: igual que al abrir un tablero
+      // guardado o volver del segundo plano, se fuerza el montado y
+      // decodificado de TODO lo importado (visible y fuera de encuadre)
+      // antes de soltar el bloqueo — ver ensureAllElementsLoaded.
+      await ensureAllElementsLoaded();
       toast('Tablero importado');
       scheduleAutosave();
     }catch(err){
       console.error(err);
       toast('El archivo no es un tablero válido');
+    }finally{
+      hideLoadingOverlay();
     }
   };
   reader.readAsText(file);
@@ -5817,11 +5838,26 @@ async function exportStoredBoardAsJson(id){
 
 const loadingOverlayEl = document.getElementById('loading-overlay');
 // Pantalla de carga: se muestra mientras el tablero se reconstruye desde
-// el almacenamiento (arranque de la app, o cambio explícito de tablero
-// guardado) y se oculta apenas termina — con manejo de errores para que
-// nunca quede trabada en pantalla si algo falla al leer los datos.
-function showLoadingOverlay(){ loadingOverlayEl?.classList.remove('hide'); }
-function hideLoadingOverlay(){ loadingOverlayEl?.classList.add('hide'); }
+// el almacenamiento (arranque de la app, cambio explícito de tablero
+// guardado, o retorno desde segundo plano) y se oculta apenas termina —
+// con manejo de errores para que nunca quede trabada en pantalla si algo
+// falla al leer los datos.
+// Contador de profundidad: si dos rutinas de carga llegaran a
+// superponerse (por ejemplo, la app vuelve de segundo plano justo
+// mientras loadBoard() todavía está en curso), el bloqueo/overlay solo
+// se libera cuando TODAS las que lo pidieron ya terminaron — nunca antes.
+let _loadingDepth = 0;
+function showLoadingOverlay(){
+  _loadingDepth++;
+  loadingOverlayEl?.classList.remove('hide');
+  setLoadingLocked(true);
+}
+function hideLoadingOverlay(){
+  _loadingDepth = Math.max(0, _loadingDepth - 1);
+  if (_loadingDepth > 0) return;
+  loadingOverlayEl?.classList.add('hide');
+  setLoadingLocked(false);
+}
 
 async function loadBoard(id){
   showLoadingOverlay();
@@ -5841,6 +5877,11 @@ async function loadBoard(id){
     currentBoardName = meta.name;
     updateBrandLabel();
     closePanel();
+    // Carga global incondicional: igual que en restoreAutosave, se
+    // fuerza el montado y decodificado de TODO el tablero recién
+    // abierto (visible y fuera de encuadre) antes de dar por terminada
+    // la apertura — ver ensureAllElementsLoaded.
+    await ensureAllElementsLoaded();
     toast('Tablero "' + meta.name + '" cargado');
     scheduleAutosave();
   }catch(err){
@@ -5893,10 +5934,9 @@ async function vacuumUnusedImages(){
 }
 function escapeHtml(s){ return s.replace(/[&<>"']/g, c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c])); }
 
-function replaceElements(newElements, newConnections){
+async function replaceElements(newElements, newConnections){
   elements.forEach(el=>domMap.get(el.id)?.remove());
   domMap.clear();
-  mountedIds.clear();
   selected.clear();
   elements = newElements.map(e => Object.assign({}, defaultsFor(e.type), e));
   zCounter = elements.length ? Math.max(1, ...elements.map(e=>e.z||1)) + 1 : 1;
@@ -5904,38 +5944,37 @@ function replaceElements(newElements, newConnections){
   selectedConnectionId = null;
   nodeLabelInput.value = '';
   if (nodePendingId){ nodePendingId = null; }
-  // Antes esto no esperaba nada: la pantalla de carga se ocultaba (en
-  // restoreAutosave/loadBoard) apenas se creaban los elementos del DOM,
-  // sin importar si las imágenes ya habían terminado de decodificarse.
-  // Con zoom alto, eso se notaba mucho: la app parecía "lista" un
-  // instante antes de que las imágenes (sobre todo las más pesadas)
-  // terminaran de aparecer, dando una sensación de recorte/parpadeo.
-  // Ahora se devuelve una promesa que junta el estado de carga de TODAS
-  // las imágenes, para que quien llame pueda esperarla antes de ocultar
-  // la pantalla de carga.
-  //
-  // VIEWPORT CULLING: acá está el punto donde antes se rompía todo con
-  // tableros grandes a zoom alto — se llamaba a renderElement() para
-  // CADA elemento del tablero de una sola vez, forzando al navegador a
-  // decodificar y subir a GPU todas las texturas juntas (de ahí el
-  // colapso / imágenes a franjas). Ahora, al cargar, solo se
-  // crean/montan los elementos cuyo AABB cae dentro del área visible +
-  // el margen de overscan (pan/zoom ya están aplicados en este punto —
-  // ver restoreAutosave/loadBoard, que los fijan ANTES de llamar acá).
-  // El resto del tablero se crea bajo demanda a medida que entra en
-  // cuadro (ver runViewportCulling), sin importar si son 20 o 2000
-  // elementos.
-  const rect = getCullingRect();
-  const loadPromises = [];
-  elements.forEach(el=>{
-    if (aabbIntersects(elementWorldAABB(el), rect)) loadPromises.push(renderElement(el));
-  });
+
+  // PERSISTENCIA TOTAL: se crean y montan en el DOM TODOS los
+  // elementos del tablero de una — nada queda afuera por estar lejos
+  // del encuadre inicial o del zoom con el que se guardó la sesión.
+  // Se usa siempre renderElement (el mismo de toda la app) para que
+  // imágenes, notas y Frames/contenedores se creen exactamente igual
+  // que siempre. La bandera __pendingImageBatch hace que, mientras
+  // tanto, ninguna imagen empiece a decodificarse todavía: solo se
+  // anota en una lista para cargarla en tandas a continuación — así
+  // se evita el único riesgo real de "montar todo de una": saturar de
+  // golpe la cola de decodificación/GPU del WebView.
+  const pendingImages = [];
+  __pendingImageBatch = pendingImages;
+  try{
+    elements.forEach(renderElement);
+  } finally {
+    __pendingImageBatch = null;
+  }
   updateEmptyHint();
   renderSelectionState();
   drawConnections();
   updateBoundsPlane();
-  scheduleCulling(); // por si el rect cambia (resize) justo después de cargar
-  return Promise.allSettled(loadPromises);
+
+  // Tandas chicas de decodificación, con un respiro de un frame entre
+  // cada una — sin importar cuántas imágenes queden fuera del encuadre
+  // inicial (zoom alto incluido), TODAS se decodifican antes de seguir.
+  await loadImagesInSafeBatches(pendingImages);
+
+  // Con todas las texturas listas y las posiciones ya estables, se
+  // fuerza un re-dibujado completo del lienzo.
+  forceFullRepaint();
 }
 
 // ---------------------------------------------------------------
@@ -5958,6 +5997,12 @@ async function doAutosave(){
   }
 }
 async function restoreAutosave(){
+  // Se activa el bloqueo/overlay de forma explícita (además de que el
+  // overlay ya arranca visible por CSS por defecto): así isLoadingLocked
+  // queda en true desde el primer instante, y el bloqueo de interacción
+  // (ver más arriba) protege también este primer arranque, no solo las
+  // cargas posteriores.
+  showLoadingOverlay();
   try{
     const data = await metaGet(AUTOSAVE_KEY);
     if (!data) { updateEmptyHint(); return; }
@@ -6001,6 +6046,12 @@ async function restoreAutosave(){
     // canvas de dibujo tuviera su tamaño final (resize inicial de la
     // página todavía en curso en dispositivos más lentos).
     requestTransformUpdate();
+    // Carga global incondicional: además de lo que replaceElements ya
+    // montó (solo lo visible + overscan), se fuerza acá el montado y
+    // decodificado de TODO el resto del tablero (lo que está fuera de
+    // encuadre) antes de considerar terminado el arranque — ver
+    // ensureAllElementsLoaded más arriba.
+    await ensureAllElementsLoaded();
   }catch(err){
     console.error('restore failed', err);
     updateEmptyHint();
@@ -6069,7 +6120,21 @@ updateActionCapsuleOverflow();
 
 // save before the page actually closes, in case debounce hasn't fired
 window.addEventListener('beforeunload', ()=>{ doAutosave(); });
-document.addEventListener('visibilitychange', ()=>{ if (document.hidden) doAutosave(); });
+document.addEventListener('visibilitychange', ()=>{
+  if (document.hidden){
+    doAutosave();
+    return;
+  }
+  // Escenario 2 del semáforo de bloqueo: la app vuelve al primer plano
+  // después de haber estado en segundo plano. Se bloquea toda
+  // interacción y se fuerza una redecodificación/remontado total del
+  // tablero (visible y fuera de vista) antes de permitir volver a tocar
+  // nada — ver ensureAllElementsLoaded. Esto evita imágenes rotas o
+  // grises, parpadeos y demás fallos gráficos si el navegador descartó
+  // texturas mientras la app estaba oculta.
+  showLoadingOverlay();
+  ensureAllElementsLoaded().catch(err=>console.error('ensureAllElementsLoaded (visibilitychange) failed', err)).finally(hideLoadingOverlay);
+});
 
 
 // ===============================================================
@@ -6326,7 +6391,7 @@ document.addEventListener('visibilitychange', ()=>{ if (document.hidden) doAutos
         if(!nodeToolActive) return; // sin la herramienta activa, el nodo es inerte: ni se mueve ni abre el menú
         beginContainerDrag(e,c,node);
       });
-      world.appendChild(node); domMap.set(c.id,node); mountedIds.add(c.id);
+      world.appendChild(node); domMap.set(c.id,node);
     }
     refreshContainerVisual(c,node);
   }
@@ -6443,7 +6508,7 @@ document.addEventListener('visibilitychange', ()=>{ if (document.hidden) doAutos
   function deleteContainer(id){
     const c=getContainer(id); if(!c) return;
     getChildren(id).forEach(ch=>ch.parentId=null);
-    domMap.get(id)?.remove();domMap.delete(id);mountedIds.delete(id);elements=elements.filter(e=>e.id!==id);
+    domMap.get(id)?.remove();domMap.delete(id);elements=elements.filter(e=>e.id!==id);
     selected.delete(id);syncContainerHandles();renderSelectionState();scheduleAutosave();toast('Contenedor eliminado');
   }
 
@@ -6491,9 +6556,18 @@ document.addEventListener('visibilitychange', ()=>{ if (document.hidden) doAutos
   }
 
   // Envolver render/position para soportar type=container.
+  // OJO: antes esta envoltura llamaba a legacyRenderElement(el) sin
+  // "return" — eso descartaba en silencio la promesa real de
+  // decodificación de cada imagen (la que espera a img.decode()).
+  // Como resultado, cualquier código que esperara a que TODO el
+  // tablero estuviera "listo" (replaceElements, y ahora también
+  // ensureAllElementsLoaded) en realidad no esperaba nada: la promesa
+  // ya venía resuelta de antemano, sin importar si la imagen había
+  // terminado de decodificarse. Se corrige devolviendo siempre la
+  // promesa real.
   renderElement=function(el){
-    if(el.type==='container'){renderContainer(el);return;}
-    legacyRenderElement(el);
+    if(el.type==='container'){renderContainer(el);return Promise.resolve();}
+    return legacyRenderElement(el);
   };
   positionNode=function(el,node){
     if(el.type==='container'){refreshContainerVisual(el,node);syncContainerHandles();return;}
