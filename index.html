@@ -1742,6 +1742,16 @@ function worldToLocalPixel(el, worldX, worldY, natW, natH){
   return {px:Math.min(natW-1,Math.max(0,px)), py:Math.min(natH-1,Math.max(0,py))};
 }
 
+// Nota: esto lee el <img> tal cual está montado en pantalla, que
+// puede estar en su versión reducida (LOD, ver setImageSrc/setImageLevel
+// más abajo) si el elemento está chico en pantalla en este momento.
+// Es intencional: para elegir un color de referencia de un moodboard,
+// una versión reducida de alta calidad (downsample con
+// imageSmoothingQuality:'high') da un color equivalente al de la
+// imagen original — a diferencia del recorte (openCrop), acá no se
+// genera ningún archivo nuevo a partir del bitmap, así que no hace
+// falta forzar resolución completa ni pagar la espera que eso
+// implicaría en cada movimiento del cuentagotas.
 function sampleColorFromElement(el, worldX, worldY){
   if (el.type !== 'image') return null;
   const imgNode = domMap.get(el.id)?.querySelector('img');
@@ -2268,7 +2278,15 @@ let zoomingRestoreTimer = null;
 function markZooming(){
   document.body.classList.add('zooming-active');
   clearTimeout(zoomingRestoreTimer);
-  zoomingRestoreTimer = setTimeout(()=>{ document.body.classList.remove('zooming-active'); }, 160);
+  zoomingRestoreTimer = setTimeout(()=>{
+    document.body.classList.remove('zooming-active');
+    // Recién cuando la cámara se queda quieta vale la pena re-evaluar
+    // qué imágenes necesitan subir/bajar de resolución (LOD, ver más
+    // abajo junto a setImageSrc) — mientras se está paneando/haciendo
+    // zoom activamente nadie está mirando el detalle fino de una
+    // imagen puntual.
+    scheduleLodPass();
+  }, 160);
 }
 function requestTransformUpdate(){
   if (transformDirty) return;
@@ -2311,7 +2329,16 @@ function nextFrame(){ return new Promise(r => requestAnimationFrame(r)); }
 async function loadImagesInSafeBatches(pendingImages){
   for (let i = 0; i < pendingImages.length; i += IMAGE_LOAD_BATCH_SIZE){
     const batch = pendingImages.slice(i, i + IMAGE_LOAD_BATCH_SIZE);
-    await Promise.allSettled(batch.map(({node, imgId}) => setImageSrc(node, imgId)));
+    // Cada imagen entra directo al nivel de detalle (LOD) que le
+    // corresponde según el zoom ACTUAL de la cámara al abrir el
+    // tablero — así un tablero con cientos de fotos abierto con zoom
+    // alejado no decodifica todo a resolución nativa de entrada, que
+    // es justo el escenario que colapsaba el búfer de texturas. Si el
+    // usuario se acerca después, scheduleLodPass() sube la resolución
+    // de lo que quede en pantalla (ver markZooming).
+    await Promise.allSettled(batch.map(({node, imgId, el}) =>
+      setImageSrc(node, imgId, el ? desiredLodLevel(el) : 'full')
+    ));
     await nextFrame();
   }
 }
@@ -2323,6 +2350,7 @@ function forceFullRepaint(){
   void world.offsetHeight; // fuerza un reflow síncrono entre los dos cambios
   world.style.willChange = 'transform';
   requestTransformUpdate();
+  scheduleLodPass();
 }
 
 // -----------------------------------------------------------------
@@ -3073,7 +3101,7 @@ function renderElement(el){
       const imgNode = node.querySelector('img');
       if (__pendingImageBatch){
         imgNode.classList.add('loading');
-        __pendingImageBatch.push({ node: imgNode, imgId: el.imgId });
+        __pendingImageBatch.push({ node: imgNode, imgId: el.imgId, el });
       } else {
         loadPromise = setImageSrc(imgNode, el.imgId);
       }
@@ -3159,7 +3187,168 @@ function detectImageAlpha(imgId, url){
     probe.src = url;
   });
 }
-function setImageSrc(imgNode, imgId){
+// -----------------------------------------------------------------
+// LOD (Level of Detail) DE IMÁGENES — el fix de fondo del parpadeo y
+// la pérdida de textura en zoom alejado
+// -----------------------------------------------------------------
+// Por qué pasa esto: la regla de "persistencia total" de arriba
+// mantiene TODAS las imágenes decodificadas a su resolución NATIVA en
+// todo momento, sin importar cuán chicas se vean en pantalla. Cada
+// imagen decodificada ocupa una textura en la memoria de GPU del
+// tamaño de su resolución de origen — un tablero con varias fotos de
+// celular (3000-4000px de lado) puede superar fácil el presupuesto de
+// VRAM de un WebView (típicamente 256-512MB en gama media), sin que
+// importe el zoom. El zoom alejado es el momento en que el problema se
+// HACE VISIBLE (todas las imágenes entran en pantalla a la vez y el
+// compositor tiene que recomponerlas todas juntas contra un búfer ya
+// saturado), pero la causa real es la memoria de textura acumulada —
+// por eso ningún truco de solo compositing (will-change, capas, etc.)
+// lo arregla de raíz; ese trabajo ya está hecho más arriba (.gpu-boost)
+// y ayuda con los tirones, pero no con el colapso de texturas.
+//
+// La solución estándar de la industria (todo motor 3D, y editores
+// "infinitos" como Figma/Miro/Google Maps) es LOD/mipmapping: por
+// debajo de cierto tamaño en pantalla, una versión reducida del bitmap
+// es VISUALMENTE IDÉNTICA a la original — la pantalla no puede mostrar
+// más detalle que píxeles físicos tiene, así que mantener 4000px de
+// datos para un recuadro de 80px en pantalla no aporta nada, solo
+// cuesta memoria. Bajando esas imágenes a una copia de hasta
+// LOD_MAX_DIM px mientras están chicas en pantalla, la memoria de
+// textura total queda ACOTADA sin importar cuántas imágenes tenga el
+// tablero — y sube a resolución completa en cuanto el usuario se
+// acerca lo suficiente como para que la diferencia sea perceptible. El
+// cambio de nivel siempre se hace sobre un bitmap ya decodificado
+// fuera de pantalla (ver preloadDecoded), así nunca hay un frame en
+// blanco ni un parpadeo al pasar de una versión a otra.
+//
+// Nada de esto oculta ni desmonta elementos: el nodo sigue siempre en
+// el DOM, siempre visible, tal cual pide la regla de persistencia
+// total de arriba — lo único que cambia es QUÉ bitmap tiene cargado el
+// <img> en cada momento.
+const LOD_MAX_DIM = 1024;    // px físicos del lado más largo de la versión reducida
+const LOD_HYSTERESIS = 1.15; // margen para no oscilar entre niveles justo en el borde del umbral
+const lodUrlCache = new Map(); // imgId -> url reducida | null (null = imagen ya chica, no hace falta LOD)
+const lodPending = new Map();  // imgId -> Promise en curso, evita generar la misma reducción 2 veces
+const lodPinned = new Set();   // ids de elemento que NO deben bajar de resolución ahora (ver openCrop)
+
+function makeLodBlobUrl(fullUrl){
+  return new Promise((resolve, reject)=>{
+    const probe = new Image();
+    probe.decoding = 'async';
+    probe.onload = () => {
+      const longest = Math.max(probe.naturalWidth, probe.naturalHeight);
+      if (longest <= LOD_MAX_DIM){ resolve(null); return; } // ya es chica: no vale la pena reducir
+      const scale = LOD_MAX_DIM / longest;
+      const w = Math.max(1, Math.round(probe.naturalWidth * scale));
+      const h = Math.max(1, Math.round(probe.naturalHeight * scale));
+      try{
+        const canvas = document.createElement('canvas');
+        canvas.width = w; canvas.height = h;
+        const cctx = canvas.getContext('2d', {alpha:true});
+        cctx.imageSmoothingEnabled = true;
+        cctx.imageSmoothingQuality = 'high'; // downsample de alta calidad: sin aliasing perceptible
+        cctx.drawImage(probe, 0, 0, w, h);
+        canvas.toBlob(blob=>{
+          resolve(blob ? URL.createObjectURL(blob) : null);
+        }, 'image/webp', 0.9);
+      }catch(err){ reject(err); }
+    };
+    probe.onerror = reject;
+    probe.src = fullUrl;
+  });
+}
+async function getOrCreateLodUrl(imgId){
+  if (lodUrlCache.has(imgId)) return lodUrlCache.get(imgId);
+  if (lodPending.has(imgId)) return lodPending.get(imgId);
+  const task = (async ()=>{
+    const fullUrl = await getOrCreateObjectUrl(imgId);
+    let url = null;
+    if (fullUrl){
+      try{ url = await makeLodBlobUrl(fullUrl); }
+      catch(err){ url = null; } // si algo falla, se sigue sirviendo la resolución completa (nunca se rompe nada)
+    }
+    lodUrlCache.set(imgId, url);
+    lodPending.delete(imgId);
+    return url;
+  })();
+  lodPending.set(imgId, task);
+  return task;
+}
+// Nivel deseado para un elemento según su tamaño ACTUAL en pantalla,
+// en píxeles FÍSICOS (no CSS px) — así en pantallas de alta densidad
+// (la mayoría de celulares) el corte respeta devicePixelRatio y nunca
+// se ve "menos nítido" de lo que la pantalla puede mostrar de todos
+// modos.
+function desiredLodLevel(el){
+  const screenPx = Math.max(el.w, el.h) * zoom * drawDpr;
+  return screenPx > LOD_MAX_DIM * LOD_HYSTERESIS ? 'full' : 'low';
+}
+// Decodifica `url` en un <img> descartable, fuera de pantalla, ANTES
+// de tocar el nodo visible — así el swap de src ocurre sobre un bitmap
+// que el navegador YA tiene listo (reutiliza su caché interna de
+// decode), sin frame en blanco ni parpadeo.
+function preloadDecoded(url){
+  return new Promise(resolve=>{
+    const probe = new Image();
+    probe.decoding = 'async';
+    probe.onload = () => {
+      if (typeof probe.decode === 'function') probe.decode().catch(()=>{}).finally(()=>resolve(url));
+      else resolve(url);
+    };
+    probe.onerror = () => resolve(null);
+    probe.src = url;
+  });
+}
+// Sube o baja el nivel de detalle de un <img> YA visible en pantalla,
+// sin el parpadeo del estado "loading" (ese es correcto solo para la
+// primera carga). Es un no-op si ya está en el nivel pedido.
+async function setImageLevel(imgNode, imgId, level){
+  let url = null;
+  if (level === 'low'){
+    url = await getOrCreateLodUrl(imgId);
+    if (!url) level = 'full'; // esta imagen ya era chica: no existe versión reducida
+  }
+  if (level === 'full') url = objectUrlCache.get(imgId) || await getOrCreateObjectUrl(imgId);
+  if (!url || !imgNode.isConnected) return;
+  if (imgNode.dataset.lodLevel === level && imgNode.dataset.lodSrc === url) return;
+  const ready = await preloadDecoded(url);
+  if (!ready || !imgNode.isConnected) return;
+  imgNode.src = ready;
+  imgNode.dataset.lodLevel = level;
+  imgNode.dataset.lodSrc = ready;
+}
+// Re-evaluación en lote: se dispara una sola vez cuando la cámara
+// (zoom o pan) se queda quieta (ver markZooming) y cuando se fuerza un
+// repintado completo. Recorrer `elements` es una comparación numérica
+// por elemento — barato incluso con miles — y lo único costoso
+// (generar la versión reducida) está cacheado por imgId y se hace como
+// mucho una vez por imagen en toda la sesión.
+let lodPassScheduled = false;
+function scheduleLodPass(){
+  if (lodPassScheduled) return;
+  lodPassScheduled = true;
+  requestAnimationFrame(()=>{
+    lodPassScheduled = false;
+    for (const el of elements){
+      if (el.type !== 'image' || !el.imgId || lodPinned.has(el.id)) continue;
+      const node = domMap.get(el.id);
+      if (!node) continue;
+      const img = node.querySelector('img');
+      if (!img || !img.dataset.lodLevel) continue; // todavía en su primera carga
+      const desired = desiredLodLevel(el);
+      if (img.dataset.lodLevel !== desired) setImageLevel(img, el.imgId, desired);
+    }
+  });
+}
+
+function setImageSrc(imgNode, imgId, level){
+  // level: nivel de detalle a cargar — 'full' (resolución nativa,
+  // comportamiento de siempre; es el valor por omisión si no se pasa
+  // nada, así que todo caller existente sigue exactamente igual) o
+  // 'low' (versión reducida, ver LOD_MAX_DIM arriba). Todo lo que
+  // necesita precisión real de píxel (recorte, "forma original") sigue
+  // pidiendo 'full' como siempre.
+  level = level === 'low' ? 'low' : 'full';
   const applyAlphaClass = (url) => {
     const wrap = imgNode.closest('.elm.img-elm');
     const known = imageAlphaCache.get(imgId);
@@ -3177,8 +3366,10 @@ function setImageSrc(imgNode, imgId){
   // a setImageSrc (por ejemplo, restoreAutosave) puede esperar a que la
   // imagen esté 100% lista para pintarse sin parpadeos ni recortes
   // visuales, en vez de solo esperar a que arranque la descarga.
-  const finish = (url) => new Promise(resolve=>{
+  const finish = (url, appliedLevel) => new Promise(resolve=>{
     imgNode.src = url;
+    imgNode.dataset.lodLevel = appliedLevel;
+    imgNode.dataset.lodSrc = url;
     applyAlphaClass(url);
     if (typeof imgNode.decode === 'function'){
       imgNode.decode().catch(()=>{}).finally(()=>{
@@ -3190,12 +3381,26 @@ function setImageSrc(imgNode, imgId){
       resolve();
     }
   });
-  const cached = objectUrlCache.get(imgId);
-  if (cached) return finish(cached);
+  if (level === 'full'){
+    const cached = objectUrlCache.get(imgId);
+    if (cached) return finish(cached, 'full');
+    imgNode.classList.add('loading');
+    return getOrCreateObjectUrl(imgId).then(url=>{
+      if (url) return finish(url, 'full');
+      imgNode.classList.remove('loading');
+    });
+  }
+  // level === 'low'
   imgNode.classList.add('loading');
-  return getOrCreateObjectUrl(imgId).then(url=>{
-    if (url) return finish(url);
-    imgNode.classList.remove('loading');
+  return getOrCreateLodUrl(imgId).then(lodUrl=>{
+    if (lodUrl) return finish(lodUrl, 'low');
+    // esta imagen no tenía versión reducida (ya era chica): cae a full
+    const cached = objectUrlCache.get(imgId);
+    if (cached) return finish(cached, 'full');
+    return getOrCreateObjectUrl(imgId).then(url=>{
+      if (url) return finish(url, 'full');
+      imgNode.classList.remove('loading');
+    });
   });
 }
 function positionNode(el, node){
@@ -4916,9 +5121,20 @@ function attachGroupHandleEvents(box){
 // ---------------------------------------------------------------
 // CROP
 // ---------------------------------------------------------------
-function openCrop(id){
+async function openCrop(id){
   const el = elements.find(e=>e.id===id);
   const node = domMap.get(id);
+  const imgForCrop = node.querySelector('img');
+  // El recorte genera un asset PERMANENTE nuevo (ver canvas.toBlob más
+  // abajo) — nunca debe partir de una versión reducida (LOD) aunque el
+  // tablero esté zoomeado lejos en este momento. Se fuerza resolución
+  // completa antes de abrir el editor (si ya estaba en 'full', que es
+  // el caso normal, esto no espera nada) y se "fija" el elemento para
+  // que no pueda bajar de resolución mientras el editor sigue abierto.
+  lodPinned.add(id);
+  if (imgForCrop && imgForCrop.dataset.lodLevel !== 'full'){
+    await setImageLevel(imgForCrop, el.imgId, 'full');
+  }
   document.querySelectorAll('.resize-handle,.rotate-handle').forEach(h=>h.style.display='none');
   const overlay = document.createElement('div');
   overlay.className = 'crop-overlay';
@@ -5016,6 +5232,7 @@ function openCrop(id){
     overlay.remove();
     confirmBar.remove();
     document.querySelectorAll('.resize-handle,.rotate-handle').forEach(h=>h.style.display='');
+    lodPinned.delete(id);
   }
   document.getElementById('crop-cancel').onclick = cleanup;
   document.getElementById('crop-ok').onclick = ()=>{
